@@ -52,7 +52,7 @@ architecture bhav of music is
 
     -- 需要设计的常数
     constant a_const_int : integer := 102400;    -- = a_real * 2^SCALE_BITS
-    constant k_const_int : integer := 16;  -- = k_real * 2^SCALE_BITS -- 瞎写的，ai建议51200000 起始？？
+    constant k_const_int : integer := 51200000;  -- = k_real * 2^SCALE_BITS -- 瞎写的，ai建议51200000 起始？？
 
     ----------------------------------------------------------------
     -- Button signals (active low on board): key2=A, key3=B, key4=C
@@ -109,14 +109,10 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
-            if reset = '1' then
-                clk3xcnt <= (others => '0');
+            if clk3xcnt = "10" then
+                clk3xcnt <= "00";
             else
-                if clk3xcnt = "10" then
-                    clk3xcnt <= "00";
-                else
-                    clk3xcnt <= clk3xcnt + 1;
-                end if;
+                clk3xcnt <= clk3xcnt + 1;
             end if;
         end if;
     end process;
@@ -136,7 +132,7 @@ begin
             frame_refreshed    => frame_refreshed
         );
 
-    enable_ccd_interact <= '1';  -- Always enabled
+    enable_ccd_interact <= reset; -- always enabled when not in reset
 
     ----------------------------------------------------------------
     -- Synchronise and edge-detect keys (active low)
@@ -144,7 +140,7 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
-            if reset = '1' then
+            if reset = '0' then
                 keyA_sync <= '1';
                 keyB_sync <= '1';
                 keyC_sync <= '1';
@@ -177,7 +173,7 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
-            if reset = '1' then
+            if reset = '0' then
                 keyA_press_cnt <= (others => '0');
                 keyA_long      <= '0';
                 keyA_long_mode <= '0';
@@ -226,6 +222,7 @@ begin
                 if B_press = '1' or C_press = '1' then
                     single_measure <= '1';
                     show_raw_mode  <= '1'; -- Show raw laser center
+                    continuous_measure <= '0'; -- Disable continuous mode
                 end if;
 
             end if;
@@ -238,7 +235,7 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
-            if reset = '1' then
+            if reset = '0' then
                 calib_req_50 <= '0';
                 calib_req_100<= '0';
                 calib_50     <= (others => '0');
@@ -283,7 +280,7 @@ begin
         variable dist_scaled : integer;
     begin
         if rising_edge(clk) then
-            if reset = '1' then
+            if reset = '0' then
                 distance_value <= (others => '0');
             else
                 lc_int := to_integer(laser_center);  -- 0 to 4095
@@ -292,7 +289,8 @@ begin
                 if denom_int <= 0 then
                     distance_value <= (others => '0');
                 else
-                    numerator   := k_const_int * (2 ** SCALE_BITS);
+                    -- numerator   := k_const_int * (2 ** SCALE_BITS);
+                    numerator   := k_const_int;
                     dist_scaled := numerator / denom_int;
 
                     if dist_scaled < 0 then
@@ -310,8 +308,18 @@ begin
     ----------------------------------------------------------------
     -- 7-seg display: segment_led entity
     ----------------------------------------------------------------
-
-    led_value <= resize(laser_center, 16) when show_raw_mode = '1' else distance_value;
+    process(clk)
+	 begin
+        if rising_edge(clk) then
+            if frame_prev='0' and frame_refreshed='1' then 
+					if show_raw_mode = '1' then
+						led_value <= resize(laser_center, 16);
+					else 
+						led_value <= distance_value;
+					end if;
+            end if;
+        end if;
+    end process;
     -- yifan 注意在按下BC时，显示的是laser_center，否则显示distance_value
 
     my_segment_led: entity work.segment_led

@@ -96,7 +96,7 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
-            if reset = '1' then
+            if reset = '0' then
                 scan_cnt   <= (others => '0');
                 scan_digit <= (others => '0');
             else
@@ -120,16 +120,16 @@ begin
         case scan_digit is
             when "00" =>   -- 显示个位
                 current_digit <= d0;
-                seg_sel(0)   <= '0';  -- 选通第 0 位(个位)
+                seg_sel(5)   <= '0';  -- 选通第 0 位(个位)
             when "01" =>   -- 显示十位
                 current_digit <= d1;
-                seg_sel(1)   <= '0';
+                seg_sel(4)   <= '0';
             when "10" =>   -- 显示百位
                 current_digit <= d2;
-                seg_sel(2)   <= '0';
+                seg_sel(3)   <= '0';
             when others => -- "11": 显示千位
                 current_digit <= d3;
-                seg_sel(3)   <= '0';
+                seg_sel(2)   <= '0';
         end case;
     end process;
 
