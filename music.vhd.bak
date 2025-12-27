@@ -1,0 +1,392 @@
+-- Music game on 6x seven-seg using three horizontal segments (a,g,d) as lanes
+-- Board pins per ax301_ax4010.tcl (Intel/Altera). Clock 50 MHz.
+-- Keys: rst_n (async active-low reset), key2/key3/key4 are lane buttons
+-- Display: seg_data[7:0] (a,b,c,d,e,f,g,dp assumed bit 0..7), seg_sel[5:0] digit selects
+-- Buzzer: single pin output square wave
+--
+-- Notes:
+-- - Uses generics to adapt to active-low or active-high wiring for segments and digit selects, and keys.
+-- - During RUN, each of the 6 digits shows one lit segment: a (top), g (middle), or d (bottom), indicating the lane for that column.
+-- - Notes shift toward digit 0 on each correct press; new random note appears at digit 5. Timeout 2s -> game over.
+-- - Game start: any lane button press. Restart: rst_n only.
+--
+-- Synthesis target: Intel Quartus. No vendor IP needed.
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity music is
+  generic(
+    G_CLOCK_HZ         : natural := 50_000_000;
+    G_SCAN_HZ          : natural := 1_200;         -- digit scan rate (total), ~200 Hz per digit
+    G_DEBOUNCE_MS      : natural := 20;            -- button debounce
+    G_TIMEOUT_MS       : natural := 2000;          -- 2 seconds to respond
+    G_BEEP_MS          : natural := 150;           -- beep duration
+    G_FREQ_GOOD_HZ     : natural := 2000;          -- friendly tone
+    G_FREQ_BAD_HZ      : natural := 400;           -- unfriendly tone
+    G_SEG_ACTIVE_LOW   : boolean := true;          -- typical boards are active-low
+    G_SEL_ACTIVE_LOW   : boolean := true;          -- typical boards are active-low
+    G_KEYS_ACTIVE_LOW  : boolean := true           -- many boards wire keys active-low
+  );
+  port(
+    clk      : in  std_logic;                      -- 50 MHz
+    rst_n    : in  std_logic;                      -- async active-low reset
+    key2     : in  std_logic;                      -- lane 0 (top: segment a)
+    key3     : in  std_logic;                      -- lane 1 (mid: segment g)
+    key4     : in  std_logic;                      -- lane 2 (bot: segment d)
+    seg_data : out std_logic_vector(7 downto 0);   -- [0]=a,1=b,2=c,3=d,4=e,5=f,6=g,7=dp
+    seg_sel  : out std_logic_vector(5 downto 0);   -- active level per generic
+    buzzer   : out std_logic                       -- square wave when beeping
+  );
+end entity;
+
+architecture rtl of music is
+  ---------------------------------------------------------------------------
+  -- Types and constants
+  ---------------------------------------------------------------------------
+  type t_state is (IDLE, RUN, GAMEOVER);
+  subtype t_lane is integer range 0 to 2; -- 0=top(a),1=mid(g),2=bot(d)
+  type t_cols is array (5 downto 0) of t_lane;
+
+  constant C_SCAN_DIV    : natural := G_CLOCK_HZ / G_SCAN_HZ; -- cycles per digit step
+  constant C_DB_CYCLES   : natural := (G_CLOCK_HZ / 1000) * G_DEBOUNCE_MS;
+  constant C_TO_CYCLES   : natural := (G_CLOCK_HZ / 1000) * G_TIMEOUT_MS;
+  constant C_BEEP_CYCLES : natural := (G_CLOCK_HZ / 1000) * G_BEEP_MS;
+
+  constant C_TGL_GOOD    : natural := G_CLOCK_HZ / (2 * G_FREQ_GOOD_HZ);
+  constant C_TGL_BAD     : natural := G_CLOCK_HZ / (2 * G_FREQ_BAD_HZ);
+
+  -- Segment bit indices
+  constant IDX_A : integer := 0;
+  constant IDX_B : integer := 1;
+  constant IDX_C : integer := 2;
+  constant IDX_D : integer := 3;
+  constant IDX_E : integer := 4;
+  constant IDX_F : integer := 5;
+  constant IDX_G : integer := 6;
+  constant IDX_DP: integer := 7;
+
+  ---------------------------------------------------------------------------
+  -- Signals
+  ---------------------------------------------------------------------------
+  signal rst            : std_logic;                   -- sync reset (active-high)
+  signal state          : t_state := IDLE;
+  signal cols           : t_cols := (others => 0);
+  signal score          : natural range 0 to 999_999 := 0;
+
+  -- LFSR for randomness
+  signal lfsr           : std_logic_vector(15 downto 0) := x"ACE1"; -- non-zero seed
+
+  -- Buttons handling
+  signal key_raw        : std_logic_vector(2 downto 0);
+  signal key_sync       : std_logic_vector(2 downto 0) := (others => '1');
+  signal pressed_level  : std_logic_vector(2 downto 0) := (others => '0'); -- normalized active-high when pressed
+  signal key_db         : std_logic_vector(2 downto 0) := (others => '0'); -- debounced level, active-high when pressed
+  signal key_prev       : std_logic_vector(2 downto 0) := (others => '0');
+  signal key_pulse      : std_logic_vector(2 downto 0) := (others => '0');
+  type t_db_cnts is array(2 downto 0) of unsigned(21 downto 0);
+  signal db_cnt         : t_db_cnts := (others => (others => '0'));
+
+  -- Timeout and beep timers
+  signal to_cnt         : unsigned(31 downto 0) := (others => '0');
+  signal to_active      : std_logic := '0';
+
+  signal beep_active    : std_logic := '0';
+  signal beep_good      : std_logic := '0';
+  signal beep_cnt       : unsigned(31 downto 0) := (others => '0');
+  signal tone_cnt       : unsigned(31 downto 0) := (others => '0');
+  signal tone_out       : std_logic := '0';
+
+  -- Display scan
+  signal scan_cnt       : unsigned(31 downto 0) := (others => '0');
+  signal scan_idx       : integer range 0 to 5 := 0;
+  signal seg_raw        : std_logic_vector(7 downto 0) := (others => '0');
+
+  -- BCD for score
+  type t_bcd6 is array(5 downto 0) of integer range 0 to 9;
+  signal score_bcd      : t_bcd6 := (others => 0);
+
+begin
+  ---------------------------------------------------------------------------
+  -- Reset and raw key vector
+  ---------------------------------------------------------------------------
+  rst <= not rst_n; -- internal active-high
+  key_raw <= key2 & key3 & key4;  -- [2]=key2(top),[1]=key3(mid),[0]=key4(bot)
+
+  ---------------------------------------------------------------------------
+  -- Synchronize and debounce keys, generate 1-clock pulses on press
+  -- Supports active-low or active-high per generic. "Press" means logical '1' here.
+  ---------------------------------------------------------------------------
+  process(clk)
+    variable i : integer;
+  begin
+    if rising_edge(clk) then
+      -- simple 2-flop sync
+      key_sync <= key_raw;
+      -- normalize polarity to active-high when pressed
+      if G_KEYS_ACTIVE_LOW then
+        pressed_level <= not key_sync;
+      else
+        pressed_level <= key_sync;
+      end if;
+
+      -- per-key debounce: if level stable for C_DB_CYCLES then accept
+      for i in 0 to 2 loop
+        if pressed_level(i) /= key_db(i) then
+          if db_cnt(i) = 0 then
+            db_cnt(i) <= to_unsigned(C_DB_CYCLES, db_cnt(i)'length);
+          else
+            db_cnt(i) <= db_cnt(i) - 1;
+            if db_cnt(i) = 1 then
+              key_db(i) <= pressed_level(i);
+            end if;
+          end if;
+        else
+          db_cnt(i) <= (others => '0');
+        end if;
+      end loop;
+
+      -- edge detect on debounced active-high level
+      key_pulse <= key_db and (not key_prev);
+      key_prev  <= key_db;
+    end if;
+  end process;
+
+  ---------------------------------------------------------------------------
+  -- LFSR for pseudo-random lanes (x^16 + x^14 + x^13 + x^11 + 1)
+  ---------------------------------------------------------------------------
+  process(clk)
+    variable feedback : std_logic;
+  begin
+    if rising_edge(clk) then
+      feedback := lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10);
+      lfsr <= lfsr(14 downto 0) & feedback;
+    end if;
+  end process;
+
+  -- Helper: map 2 LFSR bits to lane 0..2 uniformly
+  function lfsr_lane(bits : std_logic_vector(1 downto 0)) return t_lane is
+    variable v : integer := to_integer(unsigned(bits));
+  begin
+    if v = 3 then return 2; else return v; end if;
+  end function;
+
+  ---------------------------------------------------------------------------
+  -- Timeout counter (counts down when active)
+  ---------------------------------------------------------------------------
+  process(clk)
+  begin
+    if rising_edge(clk) then
+      if rst = '1' or state /= RUN then
+        to_cnt    <= (others => '0');
+        to_active <= '0';
+      else
+        if to_active = '0' then
+          to_cnt    <= to_unsigned(C_TO_CYCLES, to_cnt'length);
+          to_active <= '1';
+        elsif to_cnt /= 0 then
+          to_cnt <= to_cnt - 1;
+        end if;
+      end if;
+    end if;
+  end process;
+
+  ---------------------------------------------------------------------------
+  -- Beeper: toggles at selected frequency for BEEP_MS
+  ---------------------------------------------------------------------------
+  process(clk)
+    variable tgl_max : unsigned(31 downto 0);
+  begin
+    if rising_edge(clk) then
+      if beep_good = '1' then
+        tgl_max := to_unsigned(C_TGL_GOOD, tone_cnt'length);
+      else
+        tgl_max := to_unsigned(C_TGL_BAD, tone_cnt'length);
+      end if;
+      -- tone generator
+      if beep_active = '1' then
+        if tone_cnt = 0 then
+          tone_cnt <= tgl_max;
+          tone_out <= not tone_out;
+        else
+          tone_cnt <= tone_cnt - 1;
+        end if;
+      else
+        tone_cnt <= (others => '0');
+        tone_out <= '0';
+      end if;
+      -- duration counter
+      if beep_active = '1' then
+        if beep_cnt = 0 then
+          beep_active <= '0';
+        else
+          beep_cnt <= beep_cnt - 1;
+        end if;
+      end if;
+    end if;
+  end process;
+
+  buzzer <= tone_out;
+
+  ---------------------------------------------------------------------------
+  -- Game FSM
+  ---------------------------------------------------------------------------
+  process(clk)
+    variable any_pulse  : std_logic;
+    variable pulse_cnt  : integer;
+    variable pressed_ln : t_lane := 0;
+  begin
+    if rising_edge(clk) then
+      if rst = '1' then
+        state       <= IDLE;
+        cols        <= (others => 0);
+        score       <= 0;
+        beep_active <= '0';
+        beep_good   <= '0';
+      else
+        any_pulse := (key_pulse(2) or key_pulse(1) or key_pulse(0));
+        pulse_cnt := 0;
+        if key_pulse(2) = '1' then pulse_cnt := pulse_cnt + 1; pressed_ln := 0; end if; -- top
+        if key_pulse(1) = '1' then pulse_cnt := pulse_cnt + 1; pressed_ln := 1; end if; -- mid
+        if key_pulse(0) = '1' then pulse_cnt := pulse_cnt + 1; pressed_ln := 2; end if; -- bot
+
+        case state is
+          when IDLE =>
+            if any_pulse = '1' then
+              for i in 5 downto 0 loop
+                cols(i) <= lfsr_lane(lfsr(1 downto 0));
+              end loop;
+              score       <= 0;
+              to_active   <= '0';
+              state       <= RUN;
+            end if;
+
+          when RUN =>
+            if to_active = '1' and to_cnt = 0 then
+              beep_good   <= '0';
+              beep_cnt    <= to_unsigned(C_BEEP_CYCLES, beep_cnt'length);
+              beep_active <= '1';
+              state       <= GAMEOVER;
+            elsif any_pulse = '1' then
+              if pulse_cnt = 1 and pressed_ln = cols(0) then
+                for i in 0 to 4 loop
+                  cols(i) <= cols(i+1);
+                end loop;
+                cols(5)    <= lfsr_lane(lfsr(3 downto 2));
+                if score = 999_999 then
+                  score <= 0; -- wrap
+                else
+                  score <= score + 1;
+                end if;
+                beep_good   <= '1';
+                beep_cnt    <= to_unsigned(C_BEEP_CYCLES, beep_cnt'length);
+                beep_active <= '1';
+                to_active   <= '0';
+              else
+                beep_good   <= '0';
+                beep_cnt    <= to_unsigned(C_BEEP_CYCLES, beep_cnt'length);
+                beep_active <= '1';
+                state       <= GAMEOVER;
+              end if;
+            end if;
+
+          when GAMEOVER =>
+            null;
+        end case;
+      end if;
+    end if;
+  end process;
+
+  ---------------------------------------------------------------------------
+  -- Score to BCD (combinational, simple division)
+  ---------------------------------------------------------------------------
+  process(score)
+    variable n : natural := score;
+  begin
+    for i in 0 to 5 loop
+      score_bcd(i) <= 0;
+    end loop;
+    for i in 0 to 5 loop
+      score_bcd(i) <= n mod 10;
+      n := n / 10;
+    end loop;
+  end process;
+
+  ---------------------------------------------------------------------------
+  -- Seven-seg encoders
+  ---------------------------------------------------------------------------
+  -- Numeric digit to segments (abcdefg, dp off). 1=on logical before polarity.
+  function enc_digit(d : integer range 0 to 9) return std_logic_vector is
+    variable s : std_logic_vector(7 downto 0) := (others => '0');
+  begin
+    s := (others => '0');
+    case d is
+      when 0 => s(IDX_A) := '1'; s(IDX_B) := '1'; s(IDX_C) := '1'; s(IDX_D) := '1'; s(IDX_E) := '1'; s(IDX_F) := '1';
+      when 1 => s(IDX_B) := '1'; s(IDX_C) := '1';
+      when 2 => s(IDX_A) := '1'; s(IDX_B) := '1'; s(IDX_D) := '1'; s(IDX_E) := '1'; s(IDX_G) := '1';
+      when 3 => s(IDX_A) := '1'; s(IDX_B) := '1'; s(IDX_C) := '1'; s(IDX_D) := '1'; s(IDX_G) := '1';
+      when 4 => s(IDX_F) := '1'; s(IDX_G) := '1'; s(IDX_B) := '1'; s(IDX_C) := '1';
+      when 5 => s(IDX_A) := '1'; s(IDX_F) := '1'; s(IDX_G) := '1'; s(IDX_C) := '1'; s(IDX_D) := '1';
+      when 6 => s(IDX_A) := '1'; s(IDX_F) := '1'; s(IDX_E) := '1'; s(IDX_D) := '1'; s(IDX_C) := '1'; s(IDX_G) := '1';
+      when 7 => s(IDX_A) := '1'; s(IDX_B) := '1'; s(IDX_C) := '1';
+      when 8 => s(IDX_A) := '1'; s(IDX_B) := '1'; s(IDX_C) := '1'; s(IDX_D) := '1'; s(IDX_E) := '1'; s(IDX_F) := '1'; s(IDX_G) := '1';
+      when 9 => s(IDX_A) := '1'; s(IDX_B) := '1'; s(IDX_C) := '1'; s(IDX_D) := '1'; s(IDX_F) := '1'; s(IDX_G) := '1';
+      when others => null;
+    end case;
+    return s; -- dp stays off
+  end function;
+
+  -- Note column to segments: only a or g or d lit.
+  function enc_note(lane : t_lane) return std_logic_vector is
+    variable s : std_logic_vector(7 downto 0) := (others => '0');
+  begin
+    s := (others => '0');
+    if lane = 0 then s(IDX_A) := '1'; end if;
+    if lane = 1 then s(IDX_G) := '1'; end if;
+    if lane = 2 then s(IDX_D) := '1'; end if;
+    return s;
+  end function;
+
+  ---------------------------------------------------------------------------
+  -- Display scan: select digit and drive segments depending on state
+  ---------------------------------------------------------------------------
+  process(clk)
+    variable seg_ones   : std_logic_vector(7 downto 0);
+    variable onehot     : std_logic_vector(5 downto 0);
+  begin
+    if rising_edge(clk) then
+      if scan_cnt = 0 then
+        scan_cnt <= to_unsigned(C_SCAN_DIV - 1, scan_cnt'length);
+        if scan_idx = 5 then scan_idx <= 0; else scan_idx <= scan_idx + 1; end if;
+      else
+        scan_cnt <= scan_cnt - 1;
+      end if;
+
+      if state = GAMEOVER then
+        seg_ones := enc_digit(score_bcd(scan_idx));
+      elsif state = RUN then
+        seg_ones := enc_note(cols(scan_idx));
+      else
+        seg_ones := (others => '0');
+      end if;
+
+      if G_SEG_ACTIVE_LOW then
+        seg_raw <= not seg_ones;
+      else
+        seg_raw <= seg_ones;
+      end if;
+
+      onehot := (others => '0');
+      onehot(scan_idx) := '1';
+      if G_SEL_ACTIVE_LOW then
+        seg_sel <= not onehot;
+      else
+        seg_sel <= onehot;
+      end if;
+    end if;
+  end process;
+
+  seg_data <= seg_raw;
+
+end architecture;
