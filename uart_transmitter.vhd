@@ -22,28 +22,32 @@ end entity;
 
 architecture behav of uart_transmitter is
 	signal cnt: unsigned(7 downto 0);
-	signal started_reg: std_logic;
-	signal last_start: std_logic; -- 用于判断start的上升沿
+	signal working: std_logic;
+	signal prev_start: std_logic; -- 用于判断start的上升沿
 begin
+	process(clk)
+	begin
+		if (clk'event and clk='1') then
+			prev_start<=start;
+		end if;
+	end process;
+
+	done<= not working;
+
 	process(clk)
 	begin
 		if (clk'event and clk='1') then
 			if enable='0' then
 				tx<='1';
-				started_reg<='0';
-				done<='1';
-				last_start<='0';
+				working<='0';
 			end if;
 			if enable='1' then
-				if started_reg='0' then -- 寻找start上升沿
-					if start='1' and last_start='0' then
-						started_reg<='1';
+				if working='0' then -- 寻找start上升沿
+					if prev_start='0' and start='1' then
+						working<='1';
 						cnt<=x"00";
 						tx<='0';
-						--byte_buf<=output_byte;
-						done<='0';
 					end if;
-					last_start<=start;
 				else -- started
 					cnt<=cnt+1;
 					if cnt=to_unsigned(18,8) then
@@ -65,9 +69,7 @@ begin
 					elsif cnt=to_unsigned(162,8) then
 						tx<='1';
 					elsif cnt=to_unsigned(180,8) then
-						started_reg<='0';
-						last_start<='1';
-						done<='1';
+						working<='0';
 					end if;
 				end if;
 			end if;
