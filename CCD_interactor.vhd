@@ -192,6 +192,10 @@ begin
 					cnt_timeout<=cnt_timeout+1;
 				end if;
 				
+				if cnt_timeout<=x"FFFFF" then
+					peak_pos<=x"FFF";
+				end if;
+				
 				if receiving='0' then
 					cnt_r<=to_unsigned(0,13);
 					peak_value<=x"0000";
