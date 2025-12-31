@@ -17,8 +17,8 @@ entity music is
 		key4    : in  std_logic;
         tx_ccd  : out std_logic;
         rx_ccd  : in  std_logic;
-        tx_pc   : out std_logic;
-        rx_pc   : in  std_logic;
+        --tx_pc   : out std_logic;
+        --rx_pc   : in  std_logic;
         seg_data: out std_logic_vector(7 downto 0);
         seg_sel : out std_logic_vector(5 downto 0)
     );
@@ -67,7 +67,7 @@ architecture bhav of music is
     signal keyA_prev, keyB_prev, keyC_prev : std_logic; -- 上一时钟周期的同步信号，用来找到上升沿和下降沿
 
     -- long-press detection for A
-    signal keyA_press_cnt : unsigned(23 downto 0);  -- adjust width for time。此处按下来超过0.5秒就认为是长按
+    signal keyA_press_cnt : unsigned(27 downto 0);  -- adjust width for time。此处按下来超过0.5秒就认为是长按
     signal keyA_long      : std_logic;
     signal keyA_event     : std_logic;  -- one-clock pulse when press released
     signal keyA_long_mode : std_logic;  -- 1 = continuous mode，激活连续测量
@@ -84,15 +84,15 @@ architecture bhav of music is
     ----------------------------------------------------------------
     -- UART to PC: we will send distance_value in ASCII when new frame
     ----------------------------------------------------------------
-    signal pc_tx_enable   : std_logic;
-    signal pc_tx_start    : std_logic;
-    signal pc_tx_byte     : unsigned(7 downto 0);
-    signal pc_tx_done     : std_logic;
-    signal pc_tx_prev_done: std_logic;
-    signal pc_tx_busy     : std_logic;
-    signal pc_send_step   : unsigned(2 downto 0);  -- state for sending "XXXX\r\n"
-    signal pc_digits      : unsigned(15 downto 0); -- copy of distance_value
-    signal pc_d0, pc_d1, pc_d2, pc_d3 : unsigned(3 downto 0);
+--    signal pc_tx_enable   : std_logic;
+--    signal pc_tx_start    : std_logic;
+--    signal pc_tx_byte     : unsigned(7 downto 0);
+--    signal pc_tx_done     : std_logic;
+--    signal pc_tx_prev_done: std_logic;
+--    signal pc_tx_busy     : std_logic;
+--    signal pc_send_step   : unsigned(2 downto 0);  -- state for sending "XXXX\r\n"
+--    signal pc_digits      : unsigned(15 downto 0); -- copy of distance_value
+--    signal pc_d0, pc_d1, pc_d2, pc_d3 : unsigned(3 downto 0);
     signal A_press, A_release, B_press, C_press : std_logic;
 
 begin
@@ -102,10 +102,10 @@ begin
     -- just connect them logically. If your entity port names differ,
     -- adapt this.
     ----------------------------------------------------------------
-    keyA_raw <= key2;  -- Button A
-    keyB_raw <= key3;  -- Button B
-    keyC_raw <= key4;  -- Button C
-
+	 keyA_raw<=key2;
+	 keyB_raw<=key3;
+	 keyC_raw<=key4;
+	 
     ----------------------------------------------------------------
     -- 3x clock generation
     ----------------------------------------------------------------
@@ -193,11 +193,11 @@ begin
 
                 -- 1. Handle Button A Press/Release
                 if keyA_sync = '0' then  -- pressed
-                    if keyA_press_cnt /= x"FFFFFF" then -- Prevent wrap around
+                    if keyA_press_cnt /= x"FFFFFFF" then -- Prevent wrap around
                         keyA_press_cnt <= keyA_press_cnt + 1;
                     end if;
                     -- Threshold for long press (approx 0.5s at 50MHz)
-                    if keyA_press_cnt = to_unsigned(50_000_000, 24) then
+                    if keyA_press_cnt = to_unsigned(50_000_000, 28) then
                         keyA_long <= '1';
                     end if;
                 else  -- released (keyA_sync = '1')
@@ -242,18 +242,17 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
+		      frame_prev <= frame_refreshed;
             if reset = '0' then
                 calib_req_50 <= '0';
                 calib_req_100<= '0';
                 calib_50     <= (others => '0');
                 calib_100    <= (others => '0');
-                frame_prev   <= '0';
-				laser_center_50 <= to_unsigned(0,12);
+					 laser_center_50 <= to_unsigned(0,12);
                 laser_center_100 <= to_unsigned(0,12);
 					 
             else
-                frame_prev <= frame_refreshed;
-
+               
                 -- On B/C press, request calibration on next frame
                 if B_press = '1' then
                     calib_req_50 <= '1'; -- 我们在标定B
@@ -370,7 +369,9 @@ begin
     process(clk)
 	 begin
         if rising_edge(clk) then
-            if frame_prev='0' and frame_refreshed='1' then 
+				if reset='0' then
+				    led_value<=x"0000";
+            elsif frame_prev='0' and frame_refreshed='1' then 
 					if show_raw_mode = '1' then
 						led_value <= resize(laser_center, 16);
 					else 
