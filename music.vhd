@@ -11,8 +11,8 @@ entity music is
 		key4    : in  std_logic;
         tx_ccd  : out std_logic;
         rx_ccd  : in  std_logic;
-        tx_pc   : out std_logic;
-        rx_pc   : in  std_logic;
+        --tx_pc   : out std_logic;
+        --rx_pc   : in  std_logic;
         seg_data: out std_logic_vector(7 downto 0);
         seg_sel : out std_logic_vector(5 downto 0)
     );
@@ -47,7 +47,9 @@ architecture bhav of music is
     -- simple synchronised versions
     signal keyA_sync, keyB_sync, keyC_sync : std_logic; -- 与时钟时序同步后的信号
     signal keyA_prev, keyB_prev, keyC_prev : std_logic; -- 上一时钟周期的同步信号，用来找到上升沿和下降沿
-    signal keyA_press_cnt : unsigned(23 downto 0);  -- 此处按下来超过1秒就认为是长按
+
+    -- long-press detection for A
+    signal keyA_press_cnt : unsigned(27 downto 0);  -- adjust width for time。此处按下来超过0.5秒就认为是长按
     signal keyA_long      : std_logic;
     signal keyA_event     : std_logic;  
     signal keyA_long_mode : std_logic;  -- 1 = continuous mode，激活连续测量
@@ -152,11 +154,11 @@ begin
 					 end if;
 
                 if keyA_sync = '0' then  -- pressed
-                    if keyA_press_cnt /= x"FFFFFF" then
+                    if keyA_press_cnt /= x"FFFFFFF" then -- Prevent wrap around
                         keyA_press_cnt <= keyA_press_cnt + 1;
                     end if;
-                    -- Threshold for long press (approx 1s at 50MHz)
-                    if keyA_press_cnt = to_unsigned(50_000_000, 24) then
+                    -- Threshold for long press (approx 0.5s at 50MHz)
+                    if keyA_press_cnt = to_unsigned(50_000_000, 28) then
                         keyA_long <= '1';
                     end if;
                 else  
@@ -197,18 +199,18 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
+		      frame_prev <= frame_refreshed;
             if reset = '0' then
                 calib_req_50 <= '0';
                 calib_req_100<= '0';
                 calib_50     <= (others => '0');
                 calib_100    <= (others => '0');
-                frame_prev   <= '0';
-				laser_center_50 <= to_unsigned(0,12);
+					 laser_center_50 <= to_unsigned(0,12);
                 laser_center_100 <= to_unsigned(0,12);
 					 
             else
-                frame_prev <= frame_refreshed;
-
+               
+                -- On B/C press, request calibration on next frame
                 if B_press = '1' then
                     calib_req_50 <= '1'; -- 我们在标定B
                 end if;
@@ -322,7 +324,9 @@ begin
     process(clk)
 	 begin
         if rising_edge(clk) then
-            if frame_prev='0' and frame_refreshed='1' then 
+				if reset='0' then
+				    led_value<=x"0000";
+            elsif frame_prev='0' and frame_refreshed='1' then 
 					if show_raw_mode = '1' then
 						led_value <= resize(laser_center, 16);
 					else 

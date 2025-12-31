@@ -28,22 +28,20 @@ begin
 	process(clk)
 	begin
 		if (clk'event and clk='1') then
+			last_start<=start;
 			if enable='0' then
 				tx<='1';
 				started_reg<='0';
 				done<='1';
-				last_start<='0';
 			end if;
 			if enable='1' then
 				if started_reg='0' then -- 寻找start上升沿
 					if start='1' and last_start='0' then
 						started_reg<='1';
+						done<='0';
 						cnt<=x"00";
 						tx<='0';
-						--byte_buf<=output_byte;
-						done<='0';
 					end if;
-					last_start<=start;
 				else -- started
 					cnt<=cnt+1;
 					if cnt=to_unsigned(18,8) then
@@ -66,7 +64,6 @@ begin
 						tx<='1';
 					elsif cnt=to_unsigned(180,8) then
 						started_reg<='0';
-						last_start<='1';
 						done<='1';
 					end if;
 				end if;
