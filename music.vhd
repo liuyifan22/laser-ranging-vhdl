@@ -1,9 +1,3 @@
--- TODO:
--- Implement PC UART
--- 检查几条通路：按B键会发生什么（已经检查）
--- 按A键会发生什么
--- 长按A键会发生什么
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -11,7 +5,7 @@ use ieee.numeric_std.all;
 entity music is
     port(
         clk     : in  std_logic;
-        reset   : in  std_logic;  -- active high
+        reset   : in  std_logic;  -- active low!!!
         key2    : in  std_logic; 
 		key3    : in  std_logic;
 		key4    : in  std_logic;
@@ -25,31 +19,22 @@ entity music is
 end entity;
 
 architecture bhav of music is
-    ----------------------------------------------------------------
-    -- 3x clock for CCD UART
-    ----------------------------------------------------------------
     signal clk3x   : std_logic;
     signal clk3xcnt: unsigned(1 downto 0);
 
-    ----------------------------------------------------------------
-    -- CCD interactor interface
-    ----------------------------------------------------------------
     signal single_measure     : std_logic;
     signal continuous_measure : std_logic;
     signal laser_center       : unsigned(11 downto 0);
     signal frame_refreshed    : std_logic;
     signal enable_ccd_interact: std_logic;
-	 signal single_measure_clk: unsigned(7 downto 0);
-    ----------------------------------------------------------------
-    -- Distance value for display and PC output
-    ----------------------------------------------------------------
+	signal single_measure_clk: unsigned(7 downto 0);
+
     signal show_raw_mode  : std_logic; -- 1=Show Laser Center, 0=Show Distance
     signal led_value      : unsigned(15 downto 0);
     signal distance_value : unsigned(15 downto 0);
 	signal laser_center_50 : unsigned(11 downto 0); -- 请注意！ 这里实际上是 1m。后面那个是2m
 	signal laser_center_100 : unsigned(11 downto 0);
 
-    -- fixed-point parameters
     constant SCALE_BITS : integer := 10;  -- 2^10 = 1024
 
     -- 需要设计的常数
@@ -58,50 +43,25 @@ architecture bhav of music is
 	constant a_const_int_init : integer := 2382797;    -- = a_real * 2^SCALE_BITS
     constant k_const_int_init : integer := 721807;  -- = k_real * 2^SCALE_BITS 
 
-    ----------------------------------------------------------------
-    -- Button signals (active low on board): key2=A, key3=B, key4=C
-    ----------------------------------------------------------------
     signal keyA_raw, keyB_raw, keyC_raw : std_logic; -- fpga  的输入管脚
     -- simple synchronised versions
     signal keyA_sync, keyB_sync, keyC_sync : std_logic; -- 与时钟时序同步后的信号
     signal keyA_prev, keyB_prev, keyC_prev : std_logic; -- 上一时钟周期的同步信号，用来找到上升沿和下降沿
-
-    -- long-press detection for A
-    signal keyA_press_cnt : unsigned(23 downto 0);  -- adjust width for time。此处按下来超过0.5秒就认为是长按
+    signal keyA_press_cnt : unsigned(23 downto 0);  -- 此处按下来超过1秒就认为是长按
     signal keyA_long      : std_logic;
-    signal keyA_event     : std_logic;  -- one-clock pulse when press released
+    signal keyA_event     : std_logic;  
     signal keyA_long_mode : std_logic;  -- 1 = continuous mode，激活连续测量
 
-    -- calibration flags
-    signal calib_req_50 : std_logic; -- 此处是校准请求信号，即将距离设置为50cm后下令我们开始校准
+    signal calib_req_50 : std_logic; 
     signal calib_req_100: std_logic;
     signal frame_prev   : std_logic;
 
-    -- store calibration measurements (distance in "cm" units)
     signal calib_50  : unsigned(15 downto 0); -- 此处是50cm下测得的信号，用了我们内置的参数，需要手动解耦合计算
     signal calib_100 : unsigned(15 downto 0);
 
-    ----------------------------------------------------------------
-    -- UART to PC: we will send distance_value in ASCII when new frame
-    ----------------------------------------------------------------
-    signal pc_tx_enable   : std_logic;
-    signal pc_tx_start    : std_logic;
-    signal pc_tx_byte     : unsigned(7 downto 0);
-    signal pc_tx_done     : std_logic;
-    signal pc_tx_prev_done: std_logic;
-    signal pc_tx_busy     : std_logic;
-    signal pc_send_step   : unsigned(2 downto 0);  -- state for sending "XXXX\r\n"
-    signal pc_digits      : unsigned(15 downto 0); -- copy of distance_value
-    signal pc_d0, pc_d1, pc_d2, pc_d3 : unsigned(3 downto 0);
     signal A_press, A_release, B_press, C_press : std_logic;
 
 begin
-    ----------------------------------------------------------------
-    -- Map board pins for keys (here: use key2, key3, key4 as A,B,C)
-    -- In top-level .tcl they are named key2/key3/key4; here we
-    -- just connect them logically. If your entity port names differ,
-    -- adapt this.
-    ----------------------------------------------------------------
     keyA_raw <= key2;  -- Button A
     keyB_raw <= key3;  -- Button B
     keyC_raw <= key4;  -- Button C
@@ -109,7 +69,7 @@ begin
     ----------------------------------------------------------------
     -- 3x clock generation
     ----------------------------------------------------------------
-    clk3x <= '1' when clk3xcnt = "10" else '0'; -- yifan：注：你的三倍时钟被换掉了
+    clk3x <= '1' when clk3xcnt = "10" else '0'; -- yifan：注：新版
     process(clk)
     begin
         if rising_edge(clk) then
@@ -191,25 +151,22 @@ begin
 						  single_measure_clk<=single_measure_clk-1;
 					 end if;
 
-                -- 1. Handle Button A Press/Release
                 if keyA_sync = '0' then  -- pressed
-                    if keyA_press_cnt /= x"FFFFFF" then -- Prevent wrap around
+                    if keyA_press_cnt /= x"FFFFFF" then
                         keyA_press_cnt <= keyA_press_cnt + 1;
                     end if;
-                    -- Threshold for long press (approx 0.5s at 50MHz)
+                    -- Threshold for long press (approx 1s at 50MHz)
                     if keyA_press_cnt = to_unsigned(50_000_000, 24) then
                         keyA_long <= '1';
                     end if;
-                else  -- released (keyA_sync = '1')
-                    if keyA_prev = '0' then -- Rising edge of key (Release event)
+                else  
+                    if keyA_prev = '0' then 
                         if keyA_long = '1' then
-                            -- Long press action: Toggle Continuous Mode
                             keyA_long_mode <= not keyA_long_mode;
-                            show_raw_mode  <= '0'; -- Switch back to distance display
+                            show_raw_mode  <= '0'; 
                         else
-                            -- Short press action: Single Measure
                             single_measure_clk<=x"FF";
-                            show_raw_mode  <= '0'; -- Switch back to distance display
+                            show_raw_mode  <= '0';
                         end if;
                     end if;
                     
@@ -218,18 +175,16 @@ begin
                     keyA_long      <= '0';
                 end if;
 
-                -- 2. Handle Continuous Mode
                 if keyA_long_mode = '1' then
                     continuous_measure <= '1';
                 else
                     continuous_measure <= '0';
                 end if;
 
-                -- 3. Handle B and C (Calibration Buttons)
                 if B_press = '1' or C_press = '1' then
                     single_measure_clk <= x"FF";
-                    show_raw_mode  <= '1'; -- Show raw laser center
-                    continuous_measure <= '0'; -- Disable continuous mode
+                    show_raw_mode  <= '1'; 
+                    continuous_measure <= '0'; -- yifan: Disable continuous mode
                 end if;
 
             end if;
@@ -254,7 +209,6 @@ begin
             else
                 frame_prev <= frame_refreshed;
 
-                -- On B/C press, request calibration on next frame
                 if B_press = '1' then
                     calib_req_50 <= '1'; -- 我们在标定B
                 end if;
@@ -298,16 +252,14 @@ begin
                 a_const_int <= a_const_int_init;
                 k_const_int <= k_const_int_init;
             else
-                -- 只在两个标定点都非零时更新
+                -- yifan: 只可在两个标定点都非零时更新
                 if (laser_center_50 /= 0) and (laser_center_100 /= 0) then
                     lc50_int  := to_integer(laser_center_50);
                     lc100_int := to_integer(laser_center_100);
 
-                    -- 计算 a_const_int 和 k_const_int
                     a_tmp := (2 * lc100_int - lc50_int) * (2 ** SCALE_BITS);
                     k_tmp := 2 * (lc100_int - lc50_int) * (2 ** SCALE_BITS);
 
-                    -- 简单保护：只在计算结果为正时更新
                     if (a_tmp > 0) and (k_tmp > 0) then
                         a_const_int <= a_tmp;
                         k_const_int <= k_tmp;
@@ -385,7 +337,7 @@ begin
         port map(
             clk      => clk,
             reset    => reset,
-            value_in => led_value, -- Connected to multiplexed signal
+            value_in => led_value, 
             seg_data => seg_data,
             seg_sel  => seg_sel
         );
